@@ -19,6 +19,10 @@ def generate_id():
     return str(uuid.uuid4())[:8]
 
 
+def empty_paragraph():
+    return {"type": "PARAGRAPH", "id": generate_id(), "nodes": [], "style": {}}
+
+
 def format_decorations(is_bold=False, is_link=False, link_url=None, is_underline=False):
     dec = []
     if is_bold or is_link:
@@ -133,6 +137,30 @@ def resolve_image_src(src: str, base_url: str | None, image_url_map: dict | None
     return src
 
 
+def apply_spacing(nodes, block_type):
+    before = {"H2": 2, "H3": 1, "H4": 1, "ORDERED_LIST": 1, "BULLETED_LIST": 1, "PARAGRAPH": 1, "IMAGE": 1}
+    after = {"H2": 1, "H3": 1, "H4": 1, "ORDERED_LIST": 1, "BULLETED_LIST": 1, "PARAGRAPH": 1, "IMAGE": 1, "TABLE": 2}
+    return before.get(block_type, 0), after.get(block_type, 0)
+
+
+def count_trailing_empty_paragraphs(nodes):
+    cnt = 0
+    for n in reversed(nodes):
+        if n["type"] == "PARAGRAPH" and not n["nodes"]:
+            cnt += 1
+        else:
+            break
+    return cnt
+
+
+def ensure_spacing(nodes, required):
+    current = count_trailing_empty_paragraphs(nodes)
+    while current < required:
+        nodes.append(empty_paragraph()); current += 1
+    while current > required:
+        nodes.pop(); current -= 1
+
+
 def extract_parts(tag, bold_class, base_url, image_url_map, images_fifo):
     parts = []
     for item in tag.children:
@@ -184,7 +212,14 @@ def html_to_ricos(html_string, base_url=None, image_url_map=None, images_fifo=No
                     break
 
     def add_node(node, block_type, prev_type=None):
+        b, a = apply_spacing(nodes, block_type)
+        if block_type == "H2" and prev_type == "IMAGE":
+            b = 1
+        ensure_spacing(nodes, b)
         nodes.append(node)
+        needed = a - count_trailing_empty_paragraphs(nodes)
+        for _ in range(max(0, needed)):
+            nodes.append(empty_paragraph())
         return block_type
 
     prev = None
@@ -219,7 +254,8 @@ def html_to_ricos(html_string, base_url=None, image_url_map=None, images_fifo=No
                      for li in elem.find_all("li", recursive=False)]
             items = [i for i in items if i]
             if items:
-                prev = add_node(wrap_list(items, ordered=(tag == "ol")), tag.upper(), prev)
+                tp = "ORDERED_LIST" if tag == "ol" else "BULLETED_LIST"
+                prev = add_node(wrap_list(items, ordered=(tag == "ol")), tp, prev)
         elif tag == "table":
             table = [
                 [extract_parts(td, bold_class, base_url, image_url_map, images_fifo) for td in tr.find_all(["td", "th"])]
@@ -228,6 +264,10 @@ def html_to_ricos(html_string, base_url=None, image_url_map=None, images_fifo=No
             if table:
                 table_node = wrap_table(table)
                 prev = add_node(table_node, "TABLE", prev)
+
+    # ✅ Final cleanup: ამოვიღოთ ზედმეტი ცარიელი პარაგრაფები ბოლოში
+    while nodes and nodes[-1]["type"] == "PARAGRAPH" and not nodes[-1]["nodes"]:
+        nodes.pop()
 
     return {"nodes": nodes}
 
@@ -246,11 +286,13 @@ def convert_html():
     if not html_string:
         return jsonify({"error": "Missing 'html' in request body"}), 400
 
+    # JSON array → {filename -> wixUrl} map
     image_url_map = None
     if "uploaded_array" in data:
         uploaded = data["uploaded_array"]
         image_url_map = {item["name"]: item["data"] for item in uploaded}
 
+    # fallback: პირდაპირ map-იც შეგიძლია მიაწოდო
     if not image_url_map and "image_url_map" in data:
         image_url_map = data["image_url_map"]
 
