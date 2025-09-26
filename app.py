@@ -99,8 +99,7 @@ def wrap_table(table_data):
                 ],
                  "tableCellData": {"cellStyle": highlight_style if r_idx == 0 or c_idx == 0 else {}}}
                 for c_idx, cell in enumerate(row)
-            ]}
-            for r_idx, row in enumerate(table_data)
+            ]} for r_idx, row in enumerate(table_data)
         ],
         "tableData": {"dimensions": {
             "colsWidthRatio": [754] * num_cols,
@@ -197,10 +196,8 @@ def extract_parts(tag, bold_class, base_url, image_url_map, images_fifo):
 # HTML → Ricos
 # =========================
 
-def html_to_ricos(html_path, base_url=None, image_url_map=None, images_fifo=None):
-    with open(html_path, "r", encoding="utf-8") as f:
-        soup = BeautifulSoup(f, "html.parser")
-
+def html_to_ricos(html_string, base_url=None, image_url_map=None, images_fifo=None):
+    soup = BeautifulSoup(html_string, "html.parser")
     body = soup.body or soup
     nodes = []
     bold_class = None
@@ -279,8 +276,11 @@ def html_to_ricos(html_path, base_url=None, image_url_map=None, images_fifo=None
 def convert_html():
     data = request.get_json()
 
-    html_path = data.get("html_path")
+    html_string = data.get("html")
     base_url = data.get("base_url")
+
+    if not html_string:
+        return jsonify({"error": "Missing 'html' in request body"}), 400
 
     # JSON array → {filename -> wixUrl} map
     image_url_map = None
@@ -295,7 +295,7 @@ def convert_html():
     images_fifo = data.get("images_fifo")
 
     result = html_to_ricos(
-        html_path,
+        html_string,
         base_url=base_url,
         image_url_map=image_url_map,
         images_fifo=images_fifo
