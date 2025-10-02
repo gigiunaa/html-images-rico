@@ -10,7 +10,6 @@ import logging
 logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
 
-
 # =========================
 # Helpers
 # =========================
@@ -18,10 +17,8 @@ app = Flask(__name__)
 def generate_id():
     return str(uuid.uuid4())[:8]
 
-
 def empty_paragraph():
     return {"type": "PARAGRAPH", "id": generate_id(), "nodes": [], "style": {}}
-
 
 def format_decorations(is_bold=False, is_link=False, link_url=None, is_underline=False):
     dec = []
@@ -40,17 +37,14 @@ def format_decorations(is_bold=False, is_link=False, link_url=None, is_underline
         dec.append({"type": "UNDERLINE"})
     return dec
 
-
 def build_text_node(text, bold=False, link=None, underline=False, extra_decorations=None):
     decorations = format_decorations(bold, bool(link), link, underline)
     if extra_decorations:
         decorations.extend([d for d in extra_decorations if d])
     return {"type": "TEXT", "id": "", "textData": {"text": text, "decorations": decorations}}
 
-
 def wrap_paragraph_nodes(nodes):
     return {"type": "PARAGRAPH", "id": generate_id(), "nodes": nodes, "style": {}}
-
 
 def wrap_heading(text, level=2):
     decorations = []
@@ -64,7 +58,6 @@ def wrap_heading(text, level=2):
         "headingData": {"level": level, "textStyle": {"textAlignment": "AUTO"}}
     }
 
-
 def wrap_list(items, ordered=False):
     return {
         "type": "ORDERED_LIST" if ordered else "BULLETED_LIST",
@@ -77,7 +70,6 @@ def wrap_list(items, ordered=False):
             ]} for item in items
         ]
     }
-
 
 def wrap_table(table_data):
     num_rows = len(table_data)
@@ -108,13 +100,44 @@ def wrap_table(table_data):
         }}
     }
 
+def _normalize_img_obj(obj):
+    """
+    Normalize various incoming shapes to {'id': <wix_media_id>, 'width':?, 'height':?}
+    Accepts:
+      - {'id': '488d88_...~mv2.png', ...}
+      - {'ID': '488d88_...~mv2.png', ...}
+      - '488d88_...~mv2.png'  (raw id)
+      - Any other shape returns None
+    """
+    if isinstance(obj, dict):
+        media_id = obj.get("id") or obj.get("ID") or obj.get("mediaId")
+        if not media_id:
+            return None
+        out = {"id": media_id}
+        if "width" in obj and "height" in obj:
+            out["width"] = obj["width"]
+            out["height"] = obj["height"]
+        return out
+    elif isinstance(obj, str):
+        # If it's a raw Wix media id (contains ~mv2.), accept it
+        if "~mv2." in obj and "static.wixstatic.com/media/" not in obj:
+            return {"id": obj}
+    return None
 
 def wrap_image(img_obj, alt=""):
-    media_id = None
-    if isinstance(img_obj, dict):
-        media_id = img_obj.get("id")  # e.g. "488d88_...~mv2.png"
-    else:
-        media_id = img_obj  # fallback for plain strings
+    norm = _normalize_img_obj(img_obj)
+    if not norm or not norm.get("id"):
+        # No valid media id — skip creating an IMAGE block
+        return None
+
+    image_dict = {
+        "src": {"id": norm["id"]},
+        "metadata": {"altText": alt}
+    }
+    # width/height are optional; include if provided
+    if "width" in norm and "height" in norm:
+        image_dict["width"] = norm["width"]
+        image_dict["height"] = norm["height"]
 
     return {
         "type": "IMAGE",
@@ -126,44 +149,47 @@ def wrap_image(img_obj, alt=""):
                 "alignment": "CENTER",
                 "textWrap": True
             },
-            "image": {
-                "src": {"id": media_id},
-                "metadata": {"altText": alt}
-            }
+            "image": image_dict
         }
     }
-
-
-
 
 def is_absolute_url(url: str) -> bool:
     return url.startswith("http://") or url.startswith("https://") or url.startswith("//")
 
-
 def resolve_image_src(src: str, base_url: str | None, image_url_map: dict | None, images_fifo: list | None):
+    """
+    Resolve an <img src="..."> to an image object containing a Wix media id.
+    Priority:
+      1) Direct key hit in image_url_map (full src)
+      2) Basename key hit in image_url_map (e.g. 'image7.png')
+      3) images_fifo entry (already an id/dict)
+      4) If src itself looks like a Wix media id ('~mv2.' and not a static URL) -> use it
+      5) Otherwise, return None (we don't use plain URLs in Ricos JSON)
+    """
     if not src:
         return None
+
     if image_url_map:
         if src in image_url_map:
-            return image_url_map[src]   # dict {url, ID}
+            return image_url_map[src]
         base = os.path.basename(src)
         if base in image_url_map:
-            return image_url_map[base]  # dict {url, ID}
+            return image_url_map[base]
 
     if images_fifo is not None and len(images_fifo) > 0:
         return images_fifo.pop(0)
-    if is_absolute_url(src):
-        return src
-    if base_url:
-        return urljoin(base_url, src)
-    return src
 
+    # If the HTML already contains a raw Wix media id string, accept it
+    if "~mv2." in src and "static.wixstatic.com/media/" not in src:
+        return {"id": src}
+
+    # Otherwise we can't resolve a media id; skip (Ricos requires an id, not just a URL)
+    return None
 
 def apply_spacing(nodes, block_type):
     before = {"H2": 2, "H3": 1, "H4": 1, "ORDERED_LIST": 1, "BULLETED_LIST": 1, "PARAGRAPH": 1, "IMAGE": 1}
-    after = {"H2": 1, "H3": 1, "H4": 1, "ORDERED_LIST": 1, "BULLETED_LIST": 1, "PARAGRAPH": 1, "IMAGE": 1, "TABLE": 2}
+    after  = {"H2": 1, "H3": 1, "H4": 1, "ORDERED_LIST": 1, "BULLETED_LIST": 1, "PARAGRAPH": 1, "IMAGE": 1, "TABLE": 2}
     return before.get(block_type, 0), after.get(block_type, 0)
-
 
 def count_trailing_empty_paragraphs(nodes):
     cnt = 0
@@ -174,7 +200,6 @@ def count_trailing_empty_paragraphs(nodes):
             break
     return cnt
 
-
 def ensure_spacing(nodes, required):
     current = count_trailing_empty_paragraphs(nodes)
     while current < required:
@@ -182,8 +207,11 @@ def ensure_spacing(nodes, required):
     while current > required:
         nodes.pop(); current -= 1
 
-
 def extract_parts(tag, bold_class, base_url, image_url_map, images_fifo):
+    """
+    Build inline text parts only.
+    IMPORTANT: We deliberately SKIP <img> here so images do not end up inside paragraphs.
+    """
     parts = []
     for item in tag.children:
         if isinstance(item, NavigableString):
@@ -195,9 +223,8 @@ def extract_parts(tag, bold_class, base_url, image_url_map, images_fifo):
             if item.name == "br":
                 continue
             if item.name == "img" and item.get("src"):
-                url = resolve_image_src(item["src"], base_url, image_url_map, images_fifo)
-                if url:
-                    parts.append(wrap_image(url, item.get("alt", "")))
+                # SKIP here; images will be added as top-level blocks elsewhere
+                continue
             elif item.name == "a" and item.get("href"):
                 href = item["href"]
                 if "google.com/url?q=" in href:
@@ -213,7 +240,6 @@ def extract_parts(tag, bold_class, base_url, image_url_map, images_fifo):
                 parts.extend(extract_parts(item, bold_class, base_url, image_url_map, images_fifo))
     return parts
 
-
 # =========================
 # HTML → Ricos
 # =========================
@@ -224,6 +250,7 @@ def html_to_ricos(html_string, base_url=None, image_url_map=None, images_fifo=No
     nodes = []
     bold_class = None
 
+    # detect bold class from inline <style>
     style_tag = soup.find("style")
     if style_tag and style_tag.string:
         for ln in style_tag.string.split("}"):
@@ -234,6 +261,8 @@ def html_to_ricos(html_string, base_url=None, image_url_map=None, images_fifo=No
                     break
 
     def add_node(node, block_type, prev_type=None):
+        if node is None:
+            return prev_type
         b, a = apply_spacing(nodes, block_type)
         if block_type == "H2" and prev_type == "IMAGE":
             b = 1
@@ -249,36 +278,41 @@ def html_to_ricos(html_string, base_url=None, image_url_map=None, images_fifo=No
         tag = elem.name
         if tag == "img" and elem.get("src"):
             img_obj = resolve_image_src(elem["src"], base_url, image_url_map, images_fifo)
-            if img_obj:
-                prev = add_node(wrap_image(img_obj, elem.get("alt", "")), "IMAGE", prev)
+            prev = add_node(wrap_image(img_obj, elem.get("alt", "")), "IMAGE", prev)
 
         elif tag in ["h2", "h3", "h4"]:
             level = int(tag[1])
+            # Promote any images inside headings to top-level IMAGE blocks
             for im in elem.find_all("img"):
                 u = resolve_image_src(im["src"], base_url, image_url_map, images_fifo)
-                if u:
-                    prev = add_node(wrap_image(u, im.get("alt", "")), "IMAGE", prev)
+                prev = add_node(wrap_image(u, im.get("alt", "")), "IMAGE", prev)
             txt = elem.get_text(strip=True)
             if txt:
                 prev = add_node(wrap_heading(txt, level), f"H{level}", prev)
+
         elif tag == "p":
             imgs = elem.find_all("img", recursive=False)
             if imgs:
+                # Insert each image as a top-level IMAGE block (never inside the paragraph)
                 for im in imgs:
                     u = resolve_image_src(im["src"], base_url, image_url_map, images_fifo)
-                    if u:
-                        prev = add_node(wrap_image(u, im.get("alt", "")), "IMAGE", prev)
+                    prev = add_node(wrap_image(u, im.get("alt", "")), "IMAGE", prev)
+                # If paragraph has other text around images, capture it:
+                parts = extract_parts(elem, bold_class, base_url, image_url_map, images_fifo)
+                if parts:
+                    prev = add_node(wrap_paragraph_nodes(parts), "PARAGRAPH", prev)
             else:
                 parts = extract_parts(elem, bold_class, base_url, image_url_map, images_fifo)
                 if parts:
                     prev = add_node(wrap_paragraph_nodes(parts), "PARAGRAPH", prev)
+
         elif tag in ["ul", "ol"]:
             items = [extract_parts(li, bold_class, base_url, image_url_map, images_fifo)
                      for li in elem.find_all("li", recursive=False)]
             items = [i for i in items if i]
             if items:
-                tp = "ORDERED_LIST" if tag == "ol" else "BULLETED_LIST"
-                prev = add_node(wrap_list(items, ordered=(tag == "ol")), tp, prev)
+                prev = add_node(wrap_list(items, ordered=(tag == "ol")), "ORDERED_LIST" if tag == "ol" else "BULLETED_LIST", prev)
+
         elif tag == "table":
             table = [
                 [extract_parts(td, bold_class, base_url, image_url_map, images_fifo) for td in tr.find_all(["td", "th"])]
@@ -288,12 +322,11 @@ def html_to_ricos(html_string, base_url=None, image_url_map=None, images_fifo=No
                 table_node = wrap_table(table)
                 prev = add_node(table_node, "TABLE", prev)
 
-    # ✅ Final cleanup: ამოვიღოთ ზედმეტი ცარიელი პარაგრაფები ბოლოში
+    # Trim trailing empty paragraphs
     while nodes and nodes[-1]["type"] == "PARAGRAPH" and not nodes[-1]["nodes"]:
         nodes.pop()
 
     return {"nodes": nodes}
-
 
 # =========================
 # Flask Endpoint
@@ -309,13 +342,22 @@ def convert_html():
     if not html_string:
         return jsonify({"error": "Missing 'html' in request body"}), 400
 
-    # JSON array → {filename -> wixUrl} map
     image_url_map = None
+
+    # If you pass an array like:
+    # uploaded_array = [{ "name": "image1.png", "id": "...~mv2.png", "url": "...", "width": 624, "height": 138 }, ...]
     if "uploaded_array" in data:
         uploaded = data["uploaded_array"]
-        image_url_map = {item["name"]: item["data"] for item in uploaded}
+        image_url_map = {}
+        for item in uploaded:
+            name = item.get("name") or os.path.basename(item.get("url", "")) or item.get("id")
+            if not name:
+                continue
+            # Keep whole item so we preserve 'id' (or 'ID') and optional width/height
+            image_url_map[name] = item
 
-    # fallback: პირდაპირ map-იც შეგიძლია მიაწოდო
+    # Or you can pass a ready-made dict:
+    # image_url_map = { "image1.png": {"id": "...~mv2.png", "url": "...", "width":..., "height":...}, ... }
     if not image_url_map and "image_url_map" in data:
         image_url_map = data["image_url_map"]
 
@@ -328,7 +370,6 @@ def convert_html():
         images_fifo=images_fifo
     )
     return jsonify(result)
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
