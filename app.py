@@ -110,23 +110,16 @@ def wrap_table(table_data):
 
 
 def wrap_image(img_obj, alt=""):
-    """
-    img_obj can be:
-      - dict with keys {"url", "ID"}
-      - string URL (fallback)
-    """
-    url = img_obj["url"] if isinstance(img_obj, dict) else img_obj
-    img_id = img_obj.get("ID") if isinstance(img_obj, dict) else None
-    file_name = os.path.basename(url.split("?")[0])
-
-    src = {"url": url}
-    if img_id:
-        src["id"] = img_id
-        src["file_name"] = file_name
+    media_id = None
+    if isinstance(img_obj, dict):
+        media_id = img_obj.get("id")  # e.g. "488d88_...~mv2.png"
+    else:
+        media_id = img_obj  # fallback for plain strings
 
     return {
         "type": "IMAGE",
         "id": generate_id(),
+        "nodes": [],
         "imageData": {
             "containerData": {
                 "width": {"size": "CONTENT"},
@@ -134,11 +127,12 @@ def wrap_image(img_obj, alt=""):
                 "textWrap": True
             },
             "image": {
-                "src": src,
+                "src": {"id": media_id},
                 "metadata": {"altText": alt}
             }
         }
     }
+
 
 
 
