@@ -109,10 +109,37 @@ def wrap_table(table_data):
     }
 
 
-def wrap_image(url, alt=""):
-    return {"type": "IMAGE", "id": generate_id(),
-            "imageData": {"containerData": {"width": {"size": "CONTENT"}, "alignment": "CENTER", "textWrap": True},
-                          "image": {"src": {"url": url}, "metadata": {"altText": alt}}}}
+def wrap_image(img_obj, alt=""):
+    """
+    img_obj can be:
+      - dict with keys {"url", "ID"}
+      - string URL (fallback)
+    """
+    url = img_obj["url"] if isinstance(img_obj, dict) else img_obj
+    img_id = img_obj.get("ID") if isinstance(img_obj, dict) else None
+    file_name = os.path.basename(url.split("?")[0])
+
+    src = {"url": url}
+    if img_id:
+        src["id"] = img_id
+        src["file_name"] = file_name
+
+    return {
+        "type": "IMAGE",
+        "id": generate_id(),
+        "imageData": {
+            "containerData": {
+                "width": {"size": "CONTENT"},
+                "alignment": "CENTER",
+                "textWrap": True
+            },
+            "image": {
+                "src": src,
+                "metadata": {"altText": alt}
+            }
+        }
+    }
+
 
 
 def is_absolute_url(url: str) -> bool:
@@ -124,10 +151,11 @@ def resolve_image_src(src: str, base_url: str | None, image_url_map: dict | None
         return None
     if image_url_map:
         if src in image_url_map:
-            return image_url_map[src]
+            return image_url_map[src]   # dict {url, ID}
         base = os.path.basename(src)
         if base in image_url_map:
-            return image_url_map[base]
+            return image_url_map[base]  # dict {url, ID}
+
     if images_fifo is not None and len(images_fifo) > 0:
         return images_fifo.pop(0)
     if is_absolute_url(src):
@@ -226,9 +254,10 @@ def html_to_ricos(html_string, base_url=None, image_url_map=None, images_fifo=No
     for elem in body.find_all(recursive=False):
         tag = elem.name
         if tag == "img" and elem.get("src"):
-            url = resolve_image_src(elem["src"], base_url, image_url_map, images_fifo)
-            if url:
-                prev = add_node(wrap_image(url, elem.get("alt", "")), "IMAGE", prev)
+            img_obj = resolve_image_src(elem["src"], base_url, image_url_map, images_fifo)
+            if img_obj:
+                prev = add_node(wrap_image(img_obj, elem.get("alt", "")), "IMAGE", prev)
+
         elif tag in ["h2", "h3", "h4"]:
             level = int(tag[1])
             for im in elem.find_all("img"):
