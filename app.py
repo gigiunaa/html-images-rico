@@ -102,46 +102,68 @@ def wrap_table(table_data):
 
 def _normalize_img_obj(obj):
     """
-    Normalize various incoming shapes to {'id': <wix_media_id>, 'width':?, 'height':?}
-    Accepts:
-      - {'id': '488d88_...~mv2.png', ...}
-      - {'ID': '488d88_...~mv2.png', ...}
-      - '488d88_...~mv2.png'  (raw id)
-      - 'https://static.wixstatic.com/media/488d88_...~mv2.png' (full URL)
-      - Any other shape returns None
+    Normalizes various image object shapes into a standard dictionary
+    containing the full Wix Image URI and dimensions.
     """
+    raw_media_id = None
+    width = None
+    height = None
+
     if isinstance(obj, dict):
-        media_id = obj.get("id") or obj.get("ID") or obj.get("mediaId")
-        if not media_id:
-            return None
-        out = {"id": media_id}
-        if "width" in obj and "height" in obj:
-            out["width"] = obj["width"]
-            out["height"] = obj["height"]
-        return out
+        # Handles cases like {"id": "...", "width": 800, "height": 600}
+        raw_media_id = obj.get("id") or obj.get("ID") or obj.get("mediaId")
+        width = obj.get("width")
+        height = obj.get("height")
     elif isinstance(obj, str):
+        # Handles raw media IDs or full static URLs
         if "static.wixstatic.com/media/" in obj:
             try:
-                media_id = obj.split('/media/')[1].split('/')[0]
-                if "~mv2" in media_id:
-                    return {"id": media_id}
+                raw_media_id = obj.split('/media/')[1].split('/')[0]
             except IndexError:
                 pass
+        elif "~mv2" in obj:
+            raw_media_id = obj
+    
+    if not raw_media_id:
+        return None
+
+    # Ensure the raw_media_id doesn't already have the wix:image prefix
+    if raw_media_id.startswith('wix:image://'):
+        # It's already in the correct format, just return it with dimensions
+        out = {"id": raw_media_id}
+        if width and height:
+            out["width"] = width
+            out["height"] = height
+        return out
+
+    # Construct the full Wix Image URI required by the editor
+    # Use a placeholder for filename if not available.
+    filename = "image.jpg"
+    full_uri = f"wix:image://v1/{raw_media_id}/{filename}"
+    
+    # Append dimensions if they exist, which helps the editor render correctly
+    if width and height:
+        full_uri += f"#originWidth={width}&originHeight={height}"
+
+    out = {"id": full_uri}
+    if width and height:
+        out["width"] = width
+        out["height"] = height
         
-        if "~mv2." in obj and "static.wixstatic.com/media/" not in obj:
-            return {"id": obj}
-            
-    return None
+    return out
 
 def wrap_image(img_obj, alt=""):
     norm = _normalize_img_obj(img_obj)
     if not norm or not norm.get("id"):
         return None
 
+    # The `id` in `src` must be the full Wix URI
     image_dict = {
         "src": {"id": norm["id"]},
         "metadata": {"altText": alt}
     }
+    
+    # Width and height on the image object itself are also crucial for the editor
     if "width" in norm and "height" in norm:
         image_dict["width"] = norm["width"]
         image_dict["height"] = norm["height"]
@@ -159,6 +181,7 @@ def wrap_image(img_obj, alt=""):
             "image": image_dict
         }
     }
+
 
 def is_absolute_url(url: str) -> bool:
     return url.startswith("http://") or url.startswith("https://") or url.startswith("//")
@@ -272,30 +295,26 @@ def html_to_ricos(html_string, base_url=None, image_url_map=None, images_fifo=No
 
         elif tag in ["h2", "h3", "h4"]:
             level = int(tag[1])
-            # FIX 1: Process and remove images before getting text
             for im in elem.find_all("img"):
                 u = resolve_image_src(im["src"], base_url, image_url_map, images_fifo)
                 prev = add_node(wrap_image(u, im.get("alt", "")), "IMAGE", prev)
-                im.decompose() # Remove the image from the tree
+                im.decompose()
             
             txt = elem.get_text(strip=True)
             if txt:
                 prev = add_node(wrap_heading(txt, level), f"H{level}", prev)
 
         elif tag == "p":
-            # FIX 2: Process and remove images before getting text from paragraphs
             imgs = elem.find_all("img")
             if imgs:
                 for im in imgs:
                     u = resolve_image_src(im["src"], base_url, image_url_map, images_fifo)
                     prev = add_node(wrap_image(u, im.get("alt", "")), "IMAGE", prev)
-                    im.decompose() # Remove the image from the tree
+                    im.decompose()
 
             parts = extract_parts(elem, bold_class, base_url, image_url_map, images_fifo)
             if parts:
                 prev = add_node(wrap_paragraph_nodes(parts), "PARAGRAPH", prev)
-            # If the paragraph only contained an image, it will now be empty,
-            # and extract_parts will return [], so no extra empty paragraph is created.
 
         elif tag in ["ul", "ol"]:
             items = [extract_parts(li, bold_class, base_url, image_url_map, images_fifo)
