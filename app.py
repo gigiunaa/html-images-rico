@@ -41,7 +41,7 @@ def build_text_node(text, bold=False, link=None, underline=False, extra_decorati
     decorations = format_decorations(bold, bool(link), link, underline)
     if extra_decorations:
         decorations.extend([d for d in extra_decorations if d])
-    return {"type": "TEXT", "id": "", "textData": {"text": text, "decorations": decorations}}
+    return {"type": "TEXT", "id": generate_id(), "textData": {"text": text, "decorations": decorations}}
 
 def wrap_paragraph_nodes(nodes):
     return {"type": "PARAGRAPH", "id": generate_id(), "nodes": nodes, "style": {}}
@@ -102,13 +102,7 @@ def wrap_table(table_data):
 
 def _normalize_img_obj(obj):
     """
-    Normalize various incoming shapes to {'id': <wix_media_id>, 'width':?, 'height':?}
-    Accepts:
-      - {'id': '488d88_...~mv2.png', ...}
-      - {'ID': '488d88_...~mv2.png', ...}
-      - '488d88_...~mv2.png'  (raw id)
-      - 'https://static.wixstatic.com/media/488d88_...~mv2.png' (full URL)
-      - Any other shape returns None
+    Normalize to {'id': <wix_media_id>, 'width':?, 'height':?}
     """
     if isinstance(obj, dict):
         media_id = obj.get("id") or obj.get("ID") or obj.get("mediaId")
@@ -123,14 +117,11 @@ def _normalize_img_obj(obj):
         if "static.wixstatic.com/media/" in obj:
             try:
                 media_id = obj.split('/media/')[1].split('/')[0]
-                if "~mv2" in media_id:
-                    return {"id": media_id}
+                return {"id": media_id}
             except IndexError:
-                pass
-        
+                return None
         if "~mv2." in obj and "static.wixstatic.com/media/" not in obj:
             return {"id": obj}
-            
     return None
 
 def wrap_image(img_obj, alt=""):
@@ -138,13 +129,19 @@ def wrap_image(img_obj, alt=""):
     if not norm or not norm.get("id"):
         return None
 
+    media_id = norm["id"]
+    url = f"https://static.wixstatic.com/media/{media_id}"
+
     image_dict = {
-        "src": {"id": norm["id"]},
-        "metadata": {"altText": alt}
+        "src": {
+            "id": media_id,
+            "url": url   # ✅ Editor-სთვის აუცილებელი
+        },
+        "metadata": {"altText": alt or "Image"}
     }
     if "width" in norm and "height" in norm:
-        image_dict["width"] = norm["width"]
-        image_dict["height"] = norm["height"]
+        image_dict["src"]["width"] = norm["width"]
+        image_dict["src"]["height"] = norm["height"]
 
     return {
         "type": "IMAGE",
@@ -272,30 +269,26 @@ def html_to_ricos(html_string, base_url=None, image_url_map=None, images_fifo=No
 
         elif tag in ["h2", "h3", "h4"]:
             level = int(tag[1])
-            # FIX 1: Process and remove images before getting text
             for im in elem.find_all("img"):
                 u = resolve_image_src(im["src"], base_url, image_url_map, images_fifo)
                 prev = add_node(wrap_image(u, im.get("alt", "")), "IMAGE", prev)
-                im.decompose() # Remove the image from the tree
+                im.decompose()
             
             txt = elem.get_text(strip=True)
             if txt:
                 prev = add_node(wrap_heading(txt, level), f"H{level}", prev)
 
         elif tag == "p":
-            # FIX 2: Process and remove images before getting text from paragraphs
             imgs = elem.find_all("img")
             if imgs:
                 for im in imgs:
                     u = resolve_image_src(im["src"], base_url, image_url_map, images_fifo)
                     prev = add_node(wrap_image(u, im.get("alt", "")), "IMAGE", prev)
-                    im.decompose() # Remove the image from the tree
+                    im.decompose()
 
             parts = extract_parts(elem, bold_class, base_url, image_url_map, images_fifo)
             if parts:
                 prev = add_node(wrap_paragraph_nodes(parts), "PARAGRAPH", prev)
-            # If the paragraph only contained an image, it will now be empty,
-            # and extract_parts will return [], so no extra empty paragraph is created.
 
         elif tag in ["ul", "ol"]:
             items = [extract_parts(li, bold_class, base_url, image_url_map, images_fifo)
