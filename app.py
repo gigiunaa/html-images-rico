@@ -102,23 +102,29 @@ def wrap_table(table_data):
 
 def _normalize_img_obj(obj):
     """
-    Normalizes various image object shapes into a standard dictionary
-    containing the full Wix Image URI and dimensions.
+    Normalizes image data to extract the raw media ID, width, and height.
+    This is the format required for the final, valid Ricos JSON.
     """
     raw_media_id = None
     width = None
     height = None
+    file_name = "image.jpg" # Default filename
 
     if isinstance(obj, dict):
-        # Handles cases like {"id": "...", "width": 800, "height": 600}
         raw_media_id = obj.get("id") or obj.get("ID") or obj.get("mediaId")
         width = obj.get("width")
         height = obj.get("height")
+        # Try to get a more specific filename
+        if obj.get("name"):
+            file_name = obj["name"]
+        elif obj.get("url"):
+            file_name = os.path.basename(obj["url"])
+
     elif isinstance(obj, str):
-        # Handles raw media IDs or full static URLs
         if "static.wixstatic.com/media/" in obj:
             try:
                 raw_media_id = obj.split('/media/')[1].split('/')[0]
+                file_name = os.path.basename(urllib.parse.urlparse(obj).path)
             except IndexError:
                 pass
         elif "~mv2" in obj:
@@ -126,26 +132,12 @@ def _normalize_img_obj(obj):
     
     if not raw_media_id:
         return None
+        
+    # Clean the raw ID from any prefixes
+    if raw_media_id.startswith('wix:image://v1/'):
+        raw_media_id = raw_media_id.split('/')[3]
 
-    # Ensure the raw_media_id doesn't already have the wix:image prefix
-    if raw_media_id.startswith('wix:image://'):
-        # It's already in the correct format, just return it with dimensions
-        out = {"id": raw_media_id}
-        if width and height:
-            out["width"] = width
-            out["height"] = height
-        return out
-
-    # Construct the full Wix Image URI required by the editor
-    # Use a placeholder for filename if not available.
-    filename = "image.jpg"
-    full_uri = f"wix:image://v1/{raw_media_id}/{filename}"
-    
-    # Append dimensions if they exist, which helps the editor render correctly
-    if width and height:
-        full_uri += f"#originWidth={width}&originHeight={height}"
-
-    out = {"id": full_uri}
+    out = {"id": raw_media_id, "file_name": file_name}
     if width and height:
         out["width"] = width
         out["height"] = height
@@ -157,16 +149,15 @@ def wrap_image(img_obj, alt=""):
     if not norm or not norm.get("id"):
         return None
 
-    # The `id` in `src` must be the full Wix URI
-    image_dict = {
-        "src": {"id": norm["id"]},
-        "metadata": {"altText": alt}
+    # Construct the `src` object with all required fields inside it
+    src_obj = {
+        "id": norm["id"],
+        "file_name": norm.get("file_name", "image.jpg")
     }
     
-    # Width and height on the image object itself are also crucial for the editor
     if "width" in norm and "height" in norm:
-        image_dict["width"] = norm["width"]
-        image_dict["height"] = norm["height"]
+        src_obj["width"] = norm["width"]
+        src_obj["height"] = norm["height"]
 
     return {
         "type": "IMAGE",
@@ -178,7 +169,10 @@ def wrap_image(img_obj, alt=""):
                 "alignment": "CENTER",
                 "textWrap": True
             },
-            "image": image_dict
+            "image": {
+                "src": src_obj,
+                "metadata": {"altText": alt}
+            }
         }
     }
 
