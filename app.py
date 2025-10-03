@@ -41,7 +41,7 @@ def build_text_node(text, bold=False, link=None, underline=False, extra_decorati
     decorations = format_decorations(bold, bool(link), link, underline)
     if extra_decorations:
         decorations.extend([d for d in extra_decorations if d])
-    return {"type": "TEXT", "id": generate_id(), "textData": {"text": text, "decorations": decorations}}
+    return {"type": "TEXT", "id": "", "textData": {"text": text, "decorations": decorations}}
 
 def wrap_paragraph_nodes(nodes):
     return {"type": "PARAGRAPH", "id": generate_id(), "nodes": nodes, "style": {}}
@@ -101,46 +101,50 @@ def wrap_table(table_data):
     }
 
 def _normalize_img_obj(obj):
-    raw_media_id_source = None
-    width = None
-    height = None
-    file_name = "image.jpg"
-
+    """
+    Normalize various incoming shapes to {'id': <wix_media_id>, 'width':?, 'height':?}
+    Accepts:
+      - {'id': '488d88_...~mv2.png', ...}
+      - {'ID': '488d88_...~mv2.png', ...}
+      - '488d88_...~mv2.png'  (raw id)
+      - 'https://static.wixstatic.com/media/488d88_...~mv2.png' (full URL)
+      - Any other shape returns None
+    """
     if isinstance(obj, dict):
-        raw_media_id_source = obj.get("id") or obj.get("ID") or obj.get("mediaId")
-        width = obj.get("width")
-        height = obj.get("height")
-        file_name = obj.get("name", file_name)
-    elif isinstance(obj, str):
-        raw_media_id_source = obj
-    
-    if not raw_media_id_source:
-        return None
-
-    raw_media_id = raw_media_id_source
-    if "static.wixstatic.com/media/" in raw_media_id:
-        try:
-            raw_media_id = raw_media_id.split('/media/')[1].split('/')[0]
-        except IndexError:
+        media_id = obj.get("id") or obj.get("ID") or obj.get("mediaId")
+        if not media_id:
             return None
-    
-    if not width or not height:
-        width, height = 800, 600
-        logging.warning("Using placeholder dimensions (800x600) for image ID %s.", raw_media_id)
-
-    return {"id": raw_media_id, "width": int(width), "height": int(height), "file_name": file_name}
+        out = {"id": media_id}
+        if "width" in obj and "height" in obj:
+            out["width"] = obj["width"]
+            out["height"] = obj["height"]
+        return out
+    elif isinstance(obj, str):
+        if "static.wixstatic.com/media/" in obj:
+            try:
+                media_id = obj.split('/media/')[1].split('/')[0]
+                if "~mv2" in media_id:
+                    return {"id": media_id}
+            except IndexError:
+                pass
+        
+        if "~mv2." in obj and "static.wixstatic.com/media/" not in obj:
+            return {"id": obj}
+            
+    return None
 
 def wrap_image(img_obj, alt=""):
     norm = _normalize_img_obj(img_obj)
-    if not norm:
+    if not norm or not norm.get("id"):
         return None
 
-    src_obj = {
-        "id": norm["id"],
-        "width": norm["width"],
-        "height": norm["height"],
-        "file_name": norm.get("file_name", "image.jpg")
+    image_dict = {
+        "src": {"id": norm["id"]},
+        "metadata": {"altText": alt}
     }
+    if "width" in norm and "height" in norm:
+        image_dict["width"] = norm["width"]
+        image_dict["height"] = norm["height"]
 
     return {
         "type": "IMAGE",
@@ -152,26 +156,54 @@ def wrap_image(img_obj, alt=""):
                 "alignment": "CENTER",
                 "textWrap": True
             },
-            "image": {
-                "src": src_obj,
-                "metadata": {"altText": alt}
-            }
+            "image": image_dict
         }
     }
 
-def resolve_image_src(src: str, image_url_map: dict | None):
-    if not src or not image_url_map:
+def is_absolute_url(url: str) -> bool:
+    return url.startswith("http://") or url.startswith("https://") or url.startswith("//")
+
+def resolve_image_src(src: str, base_url: str | None, image_url_map: dict | None, images_fifo: list | None):
+    if not src:
         return None
-    
-    if src in image_url_map:
-        return image_url_map[src]
-    base = os.path.basename(src)
-    if base in image_url_map:
-        return image_url_map[base]
+
+    if image_url_map:
+        if src in image_url_map:
+            return image_url_map[src]
+        base = os.path.basename(src)
+        if base in image_url_map:
+            return image_url_map[base]
+
+    if images_fifo is not None and len(images_fifo) > 0:
+        return images_fifo.pop(0)
+
+    if "~mv2." in src and "static.wixstatic.com/media/" not in src:
+        return {"id": src}
 
     return None
 
-def extract_parts(tag, bold_class):
+def apply_spacing(nodes, block_type):
+    before = {"H2": 2, "H3": 1, "H4": 1, "ORDERED_LIST": 1, "BULLETED_LIST": 1, "PARAGRAPH": 1, "IMAGE": 1}
+    after  = {"H2": 1, "H3": 1, "H4": 1, "ORDERED_LIST": 1, "BULLETED_LIST": 1, "PARAGRAPH": 1, "IMAGE": 1, "TABLE": 2}
+    return before.get(block_type, 0), after.get(block_type, 0)
+
+def count_trailing_empty_paragraphs(nodes):
+    cnt = 0
+    for n in reversed(nodes):
+        if n["type"] == "PARAGRAPH" and not n["nodes"]:
+            cnt += 1
+        else:
+            break
+    return cnt
+
+def ensure_spacing(nodes, required):
+    current = count_trailing_empty_paragraphs(nodes)
+    while current < required:
+        nodes.append(empty_paragraph()); current += 1
+    while current > required:
+        nodes.pop(); current -= 1
+
+def extract_parts(tag, bold_class, base_url, image_url_map, images_fifo):
     parts = []
     for item in tag.children:
         if isinstance(item, NavigableString):
@@ -180,7 +212,9 @@ def extract_parts(tag, bold_class):
                 is_bold = item.parent.name == "span" and bold_class and bold_class in item.parent.get("class", [])
                 parts.append(build_text_node(txt, bold=is_bold))
         elif isinstance(item, Tag):
-            if item.name in ["br", "img"]:
+            if item.name == "br":
+                continue
+            if item.name == "img" and item.get("src"):
                 continue
             elif item.name == "a" and item.get("href"):
                 href = item["href"]
@@ -194,14 +228,14 @@ def extract_parts(tag, bold_class):
                 )
                 parts.append(build_text_node(item.get_text(), bold=is_bold, link=href, underline=True))
             else:
-                parts.extend(extract_parts(item, bold_class))
+                parts.extend(extract_parts(item, bold_class, base_url, image_url_map, images_fifo))
     return parts
 
 # =========================
 # HTML → Ricos
 # =========================
 
-def html_to_ricos(html_string, image_url_map=None):
+def html_to_ricos(html_string, base_url=None, image_url_map=None, images_fifo=None):
     soup = BeautifulSoup(html_string, "html.parser")
     body = soup.body or soup
     nodes = []
@@ -216,43 +250,71 @@ def html_to_ricos(html_string, image_url_map=None):
                     bold_class = cls[1:]
                     break
 
+    def add_node(node, block_type, prev_type=None):
+        if node is None:
+            return prev_type
+        b, a = apply_spacing(nodes, block_type)
+        if block_type == "H2" and prev_type == "IMAGE":
+            b = 1
+        ensure_spacing(nodes, b)
+        nodes.append(node)
+        needed = a - count_trailing_empty_paragraphs(nodes)
+        for _ in range(max(0, needed)):
+            nodes.append(empty_paragraph())
+        return block_type
+
+    prev = None
     for elem in body.find_all(recursive=False):
         tag = elem.name
-        
-        def add_node_with_spacing(node):
-            if not node: return
-            if nodes and nodes[-1]['type'] != 'PARAGRAPH' and node['type'] != 'PARAGRAPH':
-                nodes.append(empty_paragraph())
-            nodes.append(node)
-
         if tag == "img" and elem.get("src"):
-            img_obj = resolve_image_src(elem["src"], image_url_map)
-            add_node_with_spacing(wrap_image(img_obj, elem.get("alt", "")))
-        elif tag in ["h1", "h2", "h3", "h4"]:
+            img_obj = resolve_image_src(elem["src"], base_url, image_url_map, images_fifo)
+            prev = add_node(wrap_image(img_obj, elem.get("alt", "")), "IMAGE", prev)
+
+        elif tag in ["h2", "h3", "h4"]:
             level = int(tag[1])
+            # FIX 1: Process and remove images before getting text
             for im in elem.find_all("img"):
-                img_obj = resolve_image_src(im["src"], image_url_map)
-                add_node_with_spacing(wrap_image(img_obj, im.get("alt", "")))
-                im.decompose()
+                u = resolve_image_src(im["src"], base_url, image_url_map, images_fifo)
+                prev = add_node(wrap_image(u, im.get("alt", "")), "IMAGE", prev)
+                im.decompose() # Remove the image from the tree
+            
             txt = elem.get_text(strip=True)
             if txt:
-                add_node_with_spacing(wrap_heading(txt, level))
+                prev = add_node(wrap_heading(txt, level), f"H{level}", prev)
+
         elif tag == "p":
-            for im in elem.find_all("img"):
-                img_obj = resolve_image_src(im["src"], image_url_map)
-                add_node_with_spacing(wrap_image(img_obj, im.get("alt", "")))
-                im.decompose()
-            parts = extract_parts(elem, bold_class)
+            # FIX 2: Process and remove images before getting text from paragraphs
+            imgs = elem.find_all("img")
+            if imgs:
+                for im in imgs:
+                    u = resolve_image_src(im["src"], base_url, image_url_map, images_fifo)
+                    prev = add_node(wrap_image(u, im.get("alt", "")), "IMAGE", prev)
+                    im.decompose() # Remove the image from the tree
+
+            parts = extract_parts(elem, bold_class, base_url, image_url_map, images_fifo)
             if parts:
-                add_node_with_spacing(wrap_paragraph_nodes(parts))
+                prev = add_node(wrap_paragraph_nodes(parts), "PARAGRAPH", prev)
+            # If the paragraph only contained an image, it will now be empty,
+            # and extract_parts will return [], so no extra empty paragraph is created.
+
         elif tag in ["ul", "ol"]:
-            items = [extract_parts(li, bold_class) for li in elem.find_all("li", recursive=False) if li.get_text(strip=True)]
+            items = [extract_parts(li, bold_class, base_url, image_url_map, images_fifo)
+                     for li in elem.find_all("li", recursive=False)]
+            items = [i for i in items if i]
             if items:
-                add_node_with_spacing(wrap_list(items, ordered=(tag == "ol")))
+                prev = add_node(wrap_list(items, ordered=(tag == "ol")), "ORDERED_LIST" if tag == "ol" else "BULLETED_LIST", prev)
+
         elif tag == "table":
-            table = [[extract_parts(td, bold_class) for td in tr.find_all(["td", "th"])] for tr in elem.find_all("tr")]
+            table = [
+                [extract_parts(td, bold_class, base_url, image_url_map, images_fifo) for td in tr.find_all(["td", "th"])]
+                for tr in elem.find_all("tr")
+            ]
             if table:
-                add_node_with_spacing(wrap_table(table))
+                table_node = wrap_table(table)
+                prev = add_node(table_node, "TABLE", prev)
+
+    while nodes and nodes[-1]["type"] == "PARAGRAPH" and not nodes[-1]["nodes"]:
+        nodes.pop()
 
     return {"nodes": nodes}
 
@@ -260,45 +322,37 @@ def html_to_ricos(html_string, image_url_map=None):
 # Flask Endpoint
 # =========================
 
-def preprocess_image_url_map(image_map: dict):
-    if not image_map:
-        return {}
-    
-    processed_map = {}
-    for key, value in image_map.items():
-        if isinstance(value, str):
-            # FIX: Extract Media ID from full URL
-            if "static.wixstatic.com/media/" in value:
-                try:
-                    media_id = value.split('/media/')[1].split('/')[0]
-                    processed_map[key] = {"id": media_id}
-                except IndexError:
-                    # If URL is malformed, skip it
-                    logging.warning("Skipping malformed Wix URL for key '%s': %s", key, value)
-                    continue
-            else:
-                # If it's not a Wix URL, assume it's a raw ID
-                processed_map[key] = {"id": value}
-        elif isinstance(value, dict) and "id" in value:
-            # Value is already an object, which is the preferred format
-            processed_map[key] = value
-    
-    return processed_map
-
 @app.route("/convert-html", methods=["POST"])
 def convert_html():
     data = request.get_json()
 
     html_string = data.get("html")
+    base_url = data.get("base_url")
+
     if not html_string:
         return jsonify({"error": "Missing 'html' in request body"}), 400
 
-    image_url_map = data.get("image_url_map") or {}
-    processed_map = preprocess_image_url_map(image_url_map)
+    image_url_map = None
+
+    if "uploaded_array" in data:
+        uploaded = data["uploaded_array"]
+        image_url_map = {}
+        for item in uploaded:
+            name = item.get("name") or os.path.basename(item.get("url", "")) or item.get("id")
+            if not name:
+                continue
+            image_url_map[name] = item
+
+    if not image_url_map and "image_url_map" in data:
+        image_url_map = data["image_url_map"]
+
+    images_fifo = data.get("images_fifo")
 
     result = html_to_ricos(
         html_string,
-        image_url_map=processed_map
+        base_url=base_url,
+        image_url_map=image_url_map,
+        images_fifo=images_fifo
     )
     return jsonify(result)
 
