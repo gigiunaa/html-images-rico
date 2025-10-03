@@ -107,6 +107,7 @@ def _normalize_img_obj(obj):
       - {'id': '488d88_...~mv2.png', ...}
       - {'ID': '488d88_...~mv2.png', ...}
       - '488d88_...~mv2.png'  (raw id)
+      - 'https://static.wixstatic.com/media/488d88_...~mv2.png' (full URL)
       - Any other shape returns None
     """
     if isinstance(obj, dict):
@@ -119,9 +120,21 @@ def _normalize_img_obj(obj):
             out["height"] = obj["height"]
         return out
     elif isinstance(obj, str):
-        # If it's a raw Wix media id (contains ~mv2.), accept it
+        # NEW: Handle full static Wix URLs by extracting the ID
+        if "static.wixstatic.com/media/" in obj:
+            try:
+                # The ID is the part after '/media/' and before the next '/'
+                media_id = obj.split('/media/')[1].split('/')[0]
+                if "~mv2" in media_id:
+                    return {"id": media_id}
+            except IndexError:
+                # Malformed URL, fall through to other checks
+                pass
+        
+        # If it's a raw Wix media id (contains ~mv2. and is NOT a URL), accept it
         if "~mv2." in obj and "static.wixstatic.com/media/" not in obj:
             return {"id": obj}
+            
     return None
 
 def wrap_image(img_obj, alt=""):
