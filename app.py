@@ -120,18 +120,14 @@ def _normalize_img_obj(obj):
             out["height"] = obj["height"]
         return out
     elif isinstance(obj, str):
-        # NEW: Handle full static Wix URLs by extracting the ID
         if "static.wixstatic.com/media/" in obj:
             try:
-                # The ID is the part after '/media/' and before the next '/'
                 media_id = obj.split('/media/')[1].split('/')[0]
                 if "~mv2" in media_id:
                     return {"id": media_id}
             except IndexError:
-                # Malformed URL, fall through to other checks
                 pass
         
-        # If it's a raw Wix media id (contains ~mv2. and is NOT a URL), accept it
         if "~mv2." in obj and "static.wixstatic.com/media/" not in obj:
             return {"id": obj}
             
@@ -140,14 +136,12 @@ def _normalize_img_obj(obj):
 def wrap_image(img_obj, alt=""):
     norm = _normalize_img_obj(img_obj)
     if not norm or not norm.get("id"):
-        # No valid media id — skip creating an IMAGE block
         return None
 
     image_dict = {
         "src": {"id": norm["id"]},
         "metadata": {"altText": alt}
     }
-    # width/height are optional; include if provided
     if "width" in norm and "height" in norm:
         image_dict["width"] = norm["width"]
         image_dict["height"] = norm["height"]
@@ -170,15 +164,6 @@ def is_absolute_url(url: str) -> bool:
     return url.startswith("http://") or url.startswith("https://") or url.startswith("//")
 
 def resolve_image_src(src: str, base_url: str | None, image_url_map: dict | None, images_fifo: list | None):
-    """
-    Resolve an <img src="..."> to an image object containing a Wix media id.
-    Priority:
-      1) Direct key hit in image_url_map (full src)
-      2) Basename key hit in image_url_map (e.g. 'image7.png')
-      3) images_fifo entry (already an id/dict)
-      4) If src itself looks like a Wix media id ('~mv2.' and not a static URL) -> use it
-      5) Otherwise, return None (we don't use plain URLs in Ricos JSON)
-    """
     if not src:
         return None
 
@@ -192,11 +177,9 @@ def resolve_image_src(src: str, base_url: str | None, image_url_map: dict | None
     if images_fifo is not None and len(images_fifo) > 0:
         return images_fifo.pop(0)
 
-    # If the HTML already contains a raw Wix media id string, accept it
     if "~mv2." in src and "static.wixstatic.com/media/" not in src:
         return {"id": src}
 
-    # Otherwise we can't resolve a media id; skip (Ricos requires an id, not just a URL)
     return None
 
 def apply_spacing(nodes, block_type):
@@ -221,10 +204,6 @@ def ensure_spacing(nodes, required):
         nodes.pop(); current -= 1
 
 def extract_parts(tag, bold_class, base_url, image_url_map, images_fifo):
-    """
-    Build inline text parts only.
-    IMPORTANT: We deliberately SKIP <img> here so images do not end up inside paragraphs.
-    """
     parts = []
     for item in tag.children:
         if isinstance(item, NavigableString):
@@ -236,7 +215,6 @@ def extract_parts(tag, bold_class, base_url, image_url_map, images_fifo):
             if item.name == "br":
                 continue
             if item.name == "img" and item.get("src"):
-                # SKIP here; images will be added as top-level blocks elsewhere
                 continue
             elif item.name == "a" and item.get("href"):
                 href = item["href"]
@@ -263,7 +241,6 @@ def html_to_ricos(html_string, base_url=None, image_url_map=None, images_fifo=No
     nodes = []
     bold_class = None
 
-    # detect bold class from inline <style>
     style_tag = soup.find("style")
     if style_tag and style_tag.string:
         for ln in style_tag.string.split("}"):
@@ -295,29 +272,30 @@ def html_to_ricos(html_string, base_url=None, image_url_map=None, images_fifo=No
 
         elif tag in ["h2", "h3", "h4"]:
             level = int(tag[1])
-            # Promote any images inside headings to top-level IMAGE blocks
+            # FIX 1: Process and remove images before getting text
             for im in elem.find_all("img"):
                 u = resolve_image_src(im["src"], base_url, image_url_map, images_fifo)
                 prev = add_node(wrap_image(u, im.get("alt", "")), "IMAGE", prev)
+                im.decompose() # Remove the image from the tree
+            
             txt = elem.get_text(strip=True)
             if txt:
                 prev = add_node(wrap_heading(txt, level), f"H{level}", prev)
 
         elif tag == "p":
-            imgs = elem.find_all("img", recursive=False)
+            # FIX 2: Process and remove images before getting text from paragraphs
+            imgs = elem.find_all("img")
             if imgs:
-                # Insert each image as a top-level IMAGE block (never inside the paragraph)
                 for im in imgs:
                     u = resolve_image_src(im["src"], base_url, image_url_map, images_fifo)
                     prev = add_node(wrap_image(u, im.get("alt", "")), "IMAGE", prev)
-                # If paragraph has other text around images, capture it:
-                parts = extract_parts(elem, bold_class, base_url, image_url_map, images_fifo)
-                if parts:
-                    prev = add_node(wrap_paragraph_nodes(parts), "PARAGRAPH", prev)
-            else:
-                parts = extract_parts(elem, bold_class, base_url, image_url_map, images_fifo)
-                if parts:
-                    prev = add_node(wrap_paragraph_nodes(parts), "PARAGRAPH", prev)
+                    im.decompose() # Remove the image from the tree
+
+            parts = extract_parts(elem, bold_class, base_url, image_url_map, images_fifo)
+            if parts:
+                prev = add_node(wrap_paragraph_nodes(parts), "PARAGRAPH", prev)
+            # If the paragraph only contained an image, it will now be empty,
+            # and extract_parts will return [], so no extra empty paragraph is created.
 
         elif tag in ["ul", "ol"]:
             items = [extract_parts(li, bold_class, base_url, image_url_map, images_fifo)
@@ -335,7 +313,6 @@ def html_to_ricos(html_string, base_url=None, image_url_map=None, images_fifo=No
                 table_node = wrap_table(table)
                 prev = add_node(table_node, "TABLE", prev)
 
-    # Trim trailing empty paragraphs
     while nodes and nodes[-1]["type"] == "PARAGRAPH" and not nodes[-1]["nodes"]:
         nodes.pop()
 
@@ -357,8 +334,6 @@ def convert_html():
 
     image_url_map = None
 
-    # If you pass an array like:
-    # uploaded_array = [{ "name": "image1.png", "id": "...~mv2.png", "url": "...", "width": 624, "height": 138 }, ...]
     if "uploaded_array" in data:
         uploaded = data["uploaded_array"]
         image_url_map = {}
@@ -366,11 +341,8 @@ def convert_html():
             name = item.get("name") or os.path.basename(item.get("url", "")) or item.get("id")
             if not name:
                 continue
-            # Keep whole item so we preserve 'id' (or 'ID') and optional width/height
             image_url_map[name] = item
 
-    # Or you can pass a ready-made dict:
-    # image_url_map = { "image1.png": {"id": "...~mv2.png", "url": "...", "width":..., "height":...}, ... }
     if not image_url_map and "image_url_map" in data:
         image_url_map = data["image_url_map"]
 
