@@ -2,18 +2,13 @@ import os
 import json
 import uuid
 import urllib.parse
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 from flask import Flask, request, jsonify
 from bs4 import BeautifulSoup, Tag, NavigableString
 import logging
-import requests
 
 logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
-
-# ======== Wix Config (აუცილებელია დააყენოთ გარემოს ცვლადები) ========
-WIX_API_KEY = os.getenv("WIX_API_KEY")
-WIX_SITE_ID = os.getenv("WIX_SITE_ID")
 
 # =========================
 # Helpers
@@ -46,7 +41,7 @@ def build_text_node(text, bold=False, link=None, underline=False, extra_decorati
     decorations = format_decorations(bold, bool(link), link, underline)
     if extra_decorations:
         decorations.extend([d for d in extra_decorations if d])
-    return {"type": "TEXT", "id": "", "textData": {"text": text, "decorations": decorations}}
+    return {"type": "TEXT", "id": generate_id(), "textData": {"text": text, "decorations": decorations}}
 
 def wrap_paragraph_nodes(nodes):
     return {"type": "PARAGRAPH", "id": generate_id(), "nodes": nodes, "style": {}}
@@ -104,20 +99,48 @@ def wrap_table(table_data):
             "colsMinWidth": [120] * num_cols
         }}
     }
+
+def _normalize_img_obj(obj):
+    raw_media_id_source = None
+    width = None
+    height = None
+    file_name = "image.jpg"
+
+    if isinstance(obj, dict):
+        raw_media_id_source = obj.get("id") or obj.get("ID") or obj.get("mediaId")
+        width = obj.get("width")
+        height = obj.get("height")
+        file_name = obj.get("name", file_name)
+    elif isinstance(obj, str):
+        raw_media_id_source = obj
     
-def wrap_image(wix_image_data, alt=""):
-    """Creates a valid Ricos image node from data returned by the Wix API."""
-    if not wix_image_data or not wix_image_data.get("id"):
+    if not raw_media_id_source:
+        return None
+
+    raw_media_id = raw_media_id_source
+    if "static.wixstatic.com/media/" in raw_media_id:
+        try:
+            raw_media_id = raw_media_id.split('/media/')[1].split('/')[0]
+        except IndexError:
+            return None
+    
+    if not width or not height:
+        width, height = 800, 600
+        logging.warning("Using placeholder dimensions (800x600) for image ID %s.", raw_media_id)
+
+    return {"id": raw_media_id, "width": int(width), "height": int(height), "file_name": file_name}
+
+def wrap_image(img_obj, alt=""):
+    norm = _normalize_img_obj(img_obj)
+    if not norm:
         return None
 
     src_obj = {
-        "id": wix_image_data["id"],
-        "file_name": wix_image_data.get("file_name", "image.jpg")
+        "id": norm["id"],
+        "width": norm["width"],
+        "height": norm["height"],
+        "file_name": norm.get("file_name", "image.jpg")
     }
-    
-    if "width" in wix_image_data and "height" in wix_image_data:
-        src_obj["width"] = wix_image_data["width"]
-        src_obj["height"] = wix_image_data["height"]
 
     return {
         "type": "IMAGE",
@@ -136,81 +159,49 @@ def wrap_image(wix_image_data, alt=""):
         }
     }
 
-def is_absolute_url(u: str) -> bool:
-    try:
-        p = urlparse(u)
-        return bool(p.scheme) and bool(p.netloc)
-    except Exception:
-        return False
-        
-def wix_import_file_by_url(file_url: str, display_name: str = None):
-    if not WIX_API_KEY or not WIX_SITE_ID:
-        raise RuntimeError("WIX_API_KEY and WIX_SITE_ID must be set.")
-
-    url = "https://www.wixapis.com/site-media/v1/files/import"
-    headers = {
-        "Authorization": WIX_API_KEY,
-        "wix-site-id": WIX_SITE_ID,
-        "Content-Type": "application/json",
-    }
-    payload = {"url": file_url}
-    if display_name:
-        payload["displayName"] = display_name
-
-    try:
-        r = requests.post(url, json=payload, headers=headers, timeout=60)
-        r.raise_for_status()
-        
-        file_data = r.json().get("file", {})
-        media_info = file_data.get("media", {})
-        
-        return {
-            "id": file_data.get("id"),
-            "file_name": file_data.get("displayName", "image.jpg"),
-            "width": media_info.get("width"),
-            "height": media_info.get("height"),
-        }
-    except requests.RequestException as e:
-        logging.error("Wix import request failed for URL %s: %s", file_url, e)
+def resolve_image_src(src: str, image_url_map: dict | None):
+    if not src or not image_url_map:
         return None
+    
+    if src in image_url_map:
+        return image_url_map[src]
+    base = os.path.basename(src)
+    if base in image_url_map:
+        return image_url_map[base]
 
-def build_wix_image_map_from_html(html_string, base_url):
-    soup = BeautifulSoup(html_string, "html.parser")
-    image_map = {}
-    seen_urls = set()
+    return None
 
-    for im in soup.find_all("img"):
-        src = im.get("src")
-        if not src:
-            continue
-
-        source_url = None
-        if is_absolute_url(src):
-            source_url = src
-        elif base_url:
-            source_url = urljoin(base_url, src)
-
-        if not source_url or source_url in seen_urls:
-            continue
-        
-        seen_urls.add(source_url)
-        
-        logging.info("Uploading image to Wix from URL: %s", source_url)
-        wix_data = wix_import_file_by_url(source_url, display_name=os.path.basename(src))
-        
-        if wix_data and wix_data.get("id"):
-            image_map[src] = wix_data
-        else:
-            logging.warning("Failed to upload or get data for image: %s", src)
-
-    return image_map
-
+def extract_parts(tag, bold_class):
+    parts = []
+    for item in tag.children:
+        if isinstance(item, NavigableString):
+            txt = str(item)
+            if txt.strip():
+                is_bold = item.parent.name == "span" and bold_class and bold_class in item.parent.get("class", [])
+                parts.append(build_text_node(txt, bold=is_bold))
+        elif isinstance(item, Tag):
+            if item.name in ["br", "img"]:
+                continue
+            elif item.name == "a" and item.get("href"):
+                href = item["href"]
+                if "google.com/url?q=" in href:
+                    href = urllib.parse.unquote(href.split("q=")[1].split("&")[0])
+                else:
+                    href = urllib.parse.unquote(href)
+                is_bold = any(
+                    child.name == "span" and bold_class and bold_class in child.get("class", [])
+                    for child in item.descendants if isinstance(child, Tag)
+                )
+                parts.append(build_text_node(item.get_text(), bold=is_bold, link=href, underline=True))
+            else:
+                parts.extend(extract_parts(item, bold_class))
+    return parts
 
 # =========================
 # HTML → Ricos
 # =========================
 
-def html_to_ricos(html_string, base_url=None, image_url_map=None):
+def html_to_ricos(html_string, image_url_map=None):
     soup = BeautifulSoup(html_string, "html.parser")
     body = soup.body or soup
     nodes = []
@@ -225,98 +216,89 @@ def html_to_ricos(html_string, base_url=None, image_url_map=None):
                     bold_class = cls[1:]
                     break
 
-    def add_node(node, block_type, prev_type=None):
-        if node is None:
-            return prev_type
-        # Spacing logic...
-        nodes.append(node)
-        return block_type
-
-    def extract_parts(tag):
-        parts = []
-        for item in tag.children:
-            if isinstance(item, NavigableString):
-                txt = str(item)
-                if txt.strip():
-                    is_bold = item.parent.name == "span" and bold_class and bold_class in item.parent.get("class", [])
-                    parts.append(build_text_node(txt, bold=is_bold))
-            elif isinstance(item, Tag):
-                if item.name in ["br", "img"]:
-                    continue
-                if item.name == "a" and item.get("href"):
-                    href = urllib.parse.unquote(item["href"].split("q=")[-1].split("&")[0]) if "google.com/url?q=" in item["href"] else urllib.parse.unquote(item["href"])
-                    is_bold = any(c.name == "span" and bold_class and bold_class in c.get("class", []) for c in item.descendants if isinstance(c, Tag))
-                    parts.append(build_text_node(item.get_text(), bold=is_bold, link=href, underline=True))
-                else:
-                    parts.extend(extract_parts(item))
-        return parts
-
-    prev = None
     for elem in body.find_all(recursive=False):
         tag = elem.name
         
+        def add_node_with_spacing(node):
+            if not node: return
+            if nodes and nodes[-1]['type'] != 'PARAGRAPH' and node['type'] != 'PARAGRAPH':
+                nodes.append(empty_paragraph())
+            nodes.append(node)
+
         if tag == "img" and elem.get("src"):
-            wix_data = image_url_map.get(elem["src"])
-            prev = add_node(wrap_image(wix_data, elem.get("alt", "")), "IMAGE", prev)
+            img_obj = resolve_image_src(elem["src"], image_url_map)
+            add_node_with_spacing(wrap_image(img_obj, elem.get("alt", "")))
         elif tag in ["h1", "h2", "h3", "h4"]:
             level = int(tag[1])
             for im in elem.find_all("img"):
-                wix_data = image_url_map.get(im["src"])
-                prev = add_node(wrap_image(wix_data, im.get("alt", "")), "IMAGE", prev)
+                img_obj = resolve_image_src(im["src"], image_url_map)
+                add_node_with_spacing(wrap_image(img_obj, im.get("alt", "")))
                 im.decompose()
             txt = elem.get_text(strip=True)
             if txt:
-                prev = add_node(wrap_heading(txt, level), f"H{level}", prev)
+                add_node_with_spacing(wrap_heading(txt, level))
         elif tag == "p":
             for im in elem.find_all("img"):
-                wix_data = image_url_map.get(im["src"])
-                prev = add_node(wrap_image(wix_data, im.get("alt", "")), "IMAGE", prev)
+                img_obj = resolve_image_src(im["src"], image_url_map)
+                add_node_with_spacing(wrap_image(img_obj, im.get("alt", "")))
                 im.decompose()
-            parts = extract_parts(elem)
+            parts = extract_parts(elem, bold_class)
             if parts:
-                prev = add_node(wrap_paragraph_nodes(parts), "PARAGRAPH", prev)
+                add_node_with_spacing(wrap_paragraph_nodes(parts))
         elif tag in ["ul", "ol"]:
-            items = [extract_parts(li) for li in elem.find_all("li", recursive=False) if li]
+            items = [extract_parts(li, bold_class) for li in elem.find_all("li", recursive=False) if li.get_text(strip=True)]
             if items:
-                prev = add_node(wrap_list(items, ordered=(tag == "ol")), "ORDERED_LIST" if tag == "ol" else "BULLETED_LIST", prev)
+                add_node_with_spacing(wrap_list(items, ordered=(tag == "ol")))
         elif tag == "table":
-            table = [[extract_parts(td) for td in tr.find_all(["td", "th"])] for tr in elem.find_all("tr")]
+            table = [[extract_parts(td, bold_class) for td in tr.find_all(["td", "th"])] for tr in elem.find_all("tr")]
             if table:
-                prev = add_node(wrap_table(table), "TABLE", prev)
-    
-    # ... Simplified spacing for clarity
-    
+                add_node_with_spacing(wrap_table(table))
+
     return {"nodes": nodes}
 
 # =========================
 # Flask Endpoint
 # =========================
 
+def preprocess_image_url_map(image_map: dict):
+    if not image_map:
+        return {}
+    
+    processed_map = {}
+    for key, value in image_map.items():
+        if isinstance(value, str):
+            # FIX: Extract Media ID from full URL
+            if "static.wixstatic.com/media/" in value:
+                try:
+                    media_id = value.split('/media/')[1].split('/')[0]
+                    processed_map[key] = {"id": media_id}
+                except IndexError:
+                    # If URL is malformed, skip it
+                    logging.warning("Skipping malformed Wix URL for key '%s': %s", key, value)
+                    continue
+            else:
+                # If it's not a Wix URL, assume it's a raw ID
+                processed_map[key] = {"id": value}
+        elif isinstance(value, dict) and "id" in value:
+            # Value is already an object, which is the preferred format
+            processed_map[key] = value
+    
+    return processed_map
+
 @app.route("/convert-html", methods=["POST"])
 def convert_html():
     data = request.get_json()
-    html_string = data.get("html")
-    base_url = data.get("base_url")
-    wix_upload = data.get("wix_upload", False)
 
+    html_string = data.get("html")
     if not html_string:
         return jsonify({"error": "Missing 'html' in request body"}), 400
 
-    image_url_map = {}
-    if wix_upload:
-        try:
-            image_url_map = build_wix_image_map_from_html(html_string, base_url)
-        except Exception as e:
-            logging.exception("Wix image upload process failed.")
-            return jsonify({"error": "Failed during Wix image upload", "details": str(e)}), 500
-    else:
-        # Fallback to manually provided map if not uploading
-        image_url_map = data.get("image_url_map", {})
+    image_url_map = data.get("image_url_map") or {}
+    processed_map = preprocess_image_url_map(image_url_map)
 
     result = html_to_ricos(
         html_string,
-        base_url=base_url,
-        image_url_map=image_url_map
+        image_url_map=processed_map
     )
     return jsonify(result)
 
