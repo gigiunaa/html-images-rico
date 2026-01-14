@@ -10,9 +10,9 @@ import logging
 logging.basicConfig(level=logging.INFO)
 app = Flask(__name__)
 
-# =========================
-# Helpers
-# =========================
+# ==========================================
+#  COMMON HELPERS (Shared logic)
+# ==========================================
 
 def generate_id():
     return str(uuid.uuid4())[:8]
@@ -20,163 +20,35 @@ def generate_id():
 def empty_paragraph():
     return {"type": "PARAGRAPH", "id": generate_id(), "nodes": [], "style": {}}
 
-def format_decorations(is_bold=False, is_link=False, link_url=None, is_underline=False):
-    dec = []
-    if is_bold or is_link:
-        dec.append({"type": "BOLD", "fontWeightValue": 700})
-    if is_link:
-        dec.append({"type": "COLOR", "colorData": {"foreground": "#3A11AE", "background": "transparent"}})
-    else:
-        dec.append({"type": "COLOR", "colorData": {"foreground": "rgb(0, 0, 0)", "background": "transparent"}})
-    if is_link and link_url:
-        dec.append({
-            "type": "LINK",
-            "linkData": {"link": {"url": link_url, "target": "BLANK", "rel": {"noreferrer": True}}}
-        })
-    if is_underline:
-        dec.append({"type": "UNDERLINE"})
-    return dec
-
-def build_text_node(text, bold=False, link=None, underline=False, extra_decorations=None):
-    decorations = format_decorations(bold, bool(link), link, underline)
-    if extra_decorations:
-        decorations.extend([d for d in extra_decorations if d])
-    return {"type": "TEXT", "id": generate_id(), "textData": {"text": text, "decorations": decorations}}
-
-def wrap_paragraph_nodes(nodes):
-    return {"type": "PARAGRAPH", "id": generate_id(), "nodes": nodes, "style": {}}
-
-def wrap_heading(text, level=2):
-    decorations = []
-    if level == 3:
-        decorations.append({"type": "FONT_SIZE", "fontSizeData": {"unit": "PX", "value": 22}})
-    return {
-        "type": "HEADING",
-        "id": generate_id(),
-        "nodes": [build_text_node(text, bold=True, extra_decorations=decorations)],
-        "style": {},
-        "headingData": {"level": level, "textStyle": {"textAlignment": "AUTO"}}
-    }
-
-def wrap_list(items, ordered=False):
-    return {
-        "type": "ORDERED_LIST" if ordered else "BULLETED_LIST",
-        "id": generate_id(),
-        "nodes": [
-            {"type": "LIST_ITEM", "id": generate_id(), "nodes": [
-                {"type": "PARAGRAPH", "id": generate_id(), "nodes": item,
-                 "style": {"paddingTop": "0px", "paddingBottom": "0px"},
-                 "paragraphData": {"textStyle": {"lineHeight": "2"}}}
-            ]} for item in items
-        ]
-    }
-
-def wrap_table(table_data):
-    num_rows = len(table_data)
-    num_cols = max(len(row) for row in table_data) if table_data else 0
-    highlight_style = {"verticalAlignment": "TOP", "backgroundColor": "#CAB8FF"}
-    return {
-        "type": "TABLE",
-        "id": generate_id(),
-        "nodes": [
-            {"type": "TABLE_ROW", "id": generate_id(), "nodes": [
-                {"type": "TABLE_CELL", "id": generate_id(), "nodes": [
-                    wrap_paragraph_nodes([
-                        build_text_node(
-                            node["textData"]["text"],
-                            extra_decorations=[{"type": "FONT_SIZE", "fontSizeData": {"unit": "PX", "value": 16}}]
-                            if r_idx > 0 and c_idx > 0 else None
-                        ) for node in cell if node["type"] == "TEXT"
-                    ])
-                ],
-                 "tableCellData": {"cellStyle": highlight_style if r_idx == 0 or c_idx == 0 else {}}}
-                for c_idx, cell in enumerate(row)
-            ]} for r_idx, row in enumerate(table_data)
-        ],
-        "tableData": {"dimensions": {
-            "colsWidthRatio": [754] * num_cols,
-            "rowsHeight": [47] * num_rows,
-            "colsMinWidth": [120] * num_cols
-        }}
-    }
-
 def _normalize_img_obj(obj):
-    """
-    Normalize to {'id': <wix_media_id>, 'width':?, 'height':?}
-    """
+    """ Normalize to {'id': <wix_media_id>, 'width':?, 'height':?} """
     if isinstance(obj, dict):
         media_id = obj.get("id") or obj.get("ID") or obj.get("mediaId")
-        if not media_id:
-            return None
+        if not media_id: return None
         out = {"id": media_id}
         if "width" in obj and "height" in obj:
-            out["width"] = obj["width"]
-            out["height"] = obj["height"]
+            out["width"] = obj["width"]; out["height"] = obj["height"]
         return out
     elif isinstance(obj, str):
         if "static.wixstatic.com/media/" in obj:
-            try:
-                media_id = obj.split('/media/')[1].split('/')[0]
-                return {"id": media_id}
-            except IndexError:
-                return None
-        if "~mv2." in obj and "static.wixstatic.com/media/" not in obj:
-            return {"id": obj}
+            try: return {"id": obj.split('/media/')[1].split('/')[0]}
+            except IndexError: return None
+        if "~mv2." in obj and "static.wixstatic.com/media/" not in obj: return {"id": obj}
     return None
 
-def wrap_image(img_obj, alt=""):
-    norm = _normalize_img_obj(img_obj)
-    if not norm or not norm.get("id"):
-        return None
-
-    media_id = norm["id"]
-    url = f"https://static.wixstatic.com/media/{media_id}"
-
-    image_dict = {
-        "src": {
-            "id": media_id,
-            "url": url   # ✅ Editor-სთვის აუცილებელი
-        },
-        "metadata": {"altText": alt or "Image"}
-    }
-    if "width" in norm and "height" in norm:
-        image_dict["src"]["width"] = norm["width"]
-        image_dict["src"]["height"] = norm["height"]
-
-    return {
-        "type": "IMAGE",
-        "id": generate_id(),
-        "nodes": [],
-        "imageData": {
-            "containerData": {
-                "width": {"size": "CONTENT"},
-                "alignment": "CENTER",
-                "textWrap": True
-            },
-            "image": image_dict
-        }
-    }
-
-def is_absolute_url(url: str) -> bool:
-    return url.startswith("http://") or url.startswith("https://") or url.startswith("//")
-
 def resolve_image_src(src: str, base_url: str | None, image_url_map: dict | None, images_fifo: list | None):
-    if not src:
-        return None
-
+    if not src: return None
+    # 1. Map
     if image_url_map:
-        if src in image_url_map:
-            return image_url_map[src]
+        if src in image_url_map: return image_url_map[src]
         base = os.path.basename(src)
-        if base in image_url_map:
-            return image_url_map[base]
-
+        if base in image_url_map: return image_url_map[base]
+    # 2. FIFO
     if images_fifo is not None and len(images_fifo) > 0:
         return images_fifo.pop(0)
-
+    # 3. Direct ID
     if "~mv2." in src and "static.wixstatic.com/media/" not in src:
         return {"id": src}
-
     return None
 
 def apply_spacing(nodes, block_type):
@@ -187,18 +59,88 @@ def apply_spacing(nodes, block_type):
 def count_trailing_empty_paragraphs(nodes):
     cnt = 0
     for n in reversed(nodes):
-        if n["type"] == "PARAGRAPH" and not n["nodes"]:
-            cnt += 1
-        else:
-            break
+        if n["type"] == "PARAGRAPH" and not n["nodes"]: cnt += 1
+        else: break
     return cnt
 
 def ensure_spacing(nodes, required):
     current = count_trailing_empty_paragraphs(nodes)
-    while current < required:
-        nodes.append(empty_paragraph()); current += 1
-    while current > required:
-        nodes.pop(); current -= 1
+    while current < required: nodes.append(empty_paragraph()); current += 1
+    while current > required: nodes.pop(); current -= 1
+
+
+# ==========================================
+#  VERSION A: STANDARD STYLES (Old Endpoint)
+#  (Dark Blue Links, Purple Tables)
+# ==========================================
+
+def format_decorations(is_bold=False, is_link=False, link_url=None, is_underline=False):
+    dec = []
+    if is_bold or is_link:
+        dec.append({"type": "BOLD", "fontWeightValue": 700})
+    if is_link:
+        dec.append({"type": "COLOR", "colorData": {"foreground": "#3A11AE", "background": "transparent"}}) # Dark Blue
+    else:
+        dec.append({"type": "COLOR", "colorData": {"foreground": "rgb(0, 0, 0)", "background": "transparent"}})
+    if is_link and link_url:
+        dec.append({"type": "LINK", "linkData": {"link": {"url": link_url, "target": "BLANK", "rel": {"noreferrer": True}}}})
+    if is_underline:
+        dec.append({"type": "UNDERLINE"})
+    return dec
+
+def build_text_node(text, bold=False, link=None, underline=False, extra_decorations=None):
+    decorations = format_decorations(bold, bool(link), link, underline)
+    if extra_decorations: decorations.extend([d for d in extra_decorations if d])
+    return {"type": "TEXT", "id": generate_id(), "textData": {"text": text, "decorations": decorations}}
+
+def wrap_paragraph_nodes(nodes):
+    return {"type": "PARAGRAPH", "id": generate_id(), "nodes": nodes, "style": {}}
+
+def wrap_heading(text, level=2):
+    decorations = []
+    if level == 3: decorations.append({"type": "FONT_SIZE", "fontSizeData": {"unit": "PX", "value": 22}})
+    return {
+        "type": "HEADING", "id": generate_id(), "nodes": [build_text_node(text, bold=True, extra_decorations=decorations)],
+        "style": {}, "headingData": {"level": level, "textStyle": {"textAlignment": "AUTO"}}
+    }
+
+def wrap_list(items, ordered=False):
+    return {
+        "type": "ORDERED_LIST" if ordered else "BULLETED_LIST", "id": generate_id(),
+        "nodes": [{"type": "LIST_ITEM", "id": generate_id(), "nodes": [
+            {"type": "PARAGRAPH", "id": generate_id(), "nodes": item, "style": {"paddingTop": "0px", "paddingBottom": "0px"}, "paragraphData": {"textStyle": {"lineHeight": "2"}}}
+        ]} for item in items]
+    }
+
+def wrap_table(table_data):
+    num_rows = len(table_data)
+    num_cols = max(len(row) for row in table_data) if table_data else 0
+    highlight_style = {"verticalAlignment": "TOP", "backgroundColor": "#CAB8FF"} # Purple Background
+    return {
+        "type": "TABLE", "id": generate_id(),
+        "nodes": [{"type": "TABLE_ROW", "id": generate_id(), "nodes": [
+            {"type": "TABLE_CELL", "id": generate_id(), "nodes": [
+                wrap_paragraph_nodes([
+                    build_text_node(
+                        node["textData"]["text"],
+                        extra_decorations=[{"type": "FONT_SIZE", "fontSizeData": {"unit": "PX", "value": 16}}] if r_idx > 0 and c_idx > 0 else None
+                    ) for node in cell if node["type"] == "TEXT"
+                ])
+            ], "tableCellData": {"cellStyle": highlight_style if r_idx == 0 or c_idx == 0 else {}}}
+            for c_idx, cell in enumerate(row)
+        ]} for r_idx, row in enumerate(table_data)],
+        "tableData": {"dimensions": {"colsWidthRatio": [754] * num_cols, "rowsHeight": [47] * num_rows, "colsMinWidth": [120] * num_cols}}
+    }
+
+def wrap_image(img_obj, alt=""):
+    norm = _normalize_img_obj(img_obj)
+    if not norm or not norm.get("id"): return None
+    media_id = norm["id"]
+    url = f"https://static.wixstatic.com/media/{media_id}"
+    image_dict = {"src": {"id": media_id, "url": url}, "metadata": {"altText": alt or "Image"}}
+    if "width" in norm and "height" in norm:
+        image_dict["src"]["width"] = norm["width"]; image_dict["src"]["height"] = norm["height"]
+    return {"type": "IMAGE", "id": generate_id(), "nodes": [], "imageData": {"containerData": {"width": {"size": "CONTENT"}, "alignment": "CENTER", "textWrap": True}, "image": image_dict}}
 
 def extract_parts(tag, bold_class, base_url, image_url_map, images_fifo):
     parts = []
@@ -209,55 +151,38 @@ def extract_parts(tag, bold_class, base_url, image_url_map, images_fifo):
                 is_bold = item.parent.name == "span" and bold_class and bold_class in item.parent.get("class", [])
                 parts.append(build_text_node(txt, bold=is_bold))
         elif isinstance(item, Tag):
-            if item.name == "br":
-                continue
-            if item.name == "img" and item.get("src"):
-                continue
+            if item.name == "br": continue
+            if item.name == "img": continue
             elif item.name == "a" and item.get("href"):
                 href = item["href"]
-                if "google.com/url?q=" in href:
-                    href = urllib.parse.unquote(href.split("q=")[1].split("&")[0])
-                else:
-                    href = urllib.parse.unquote(href)
-                is_bold = any(
-                    child.name == "span" and bold_class and bold_class in child.get("class", [])
-                    for child in item.descendants if isinstance(child, Tag)
-                )
+                if "google.com/url?q=" in href: href = urllib.parse.unquote(href.split("q=")[1].split("&")[0])
+                else: href = urllib.parse.unquote(href)
+                is_bold = any(child.name == "span" and bold_class and bold_class in child.get("class", []) for child in item.descendants if isinstance(child, Tag))
                 parts.append(build_text_node(item.get_text(), bold=is_bold, link=href, underline=True))
             else:
                 parts.extend(extract_parts(item, bold_class, base_url, image_url_map, images_fifo))
     return parts
-
-# =========================
-# HTML → Ricos
-# =========================
 
 def html_to_ricos(html_string, base_url=None, image_url_map=None, images_fifo=None):
     soup = BeautifulSoup(html_string, "html.parser")
     body = soup.body or soup
     nodes = []
     bold_class = None
-
     style_tag = soup.find("style")
     if style_tag and style_tag.string:
         for ln in style_tag.string.split("}"):
             if "font-weight:700" in ln:
                 cls = ln.split("{")[0].strip()
-                if cls.startswith("."):
-                    bold_class = cls[1:]
-                    break
+                if cls.startswith("."): bold_class = cls[1:]; break
 
     def add_node(node, block_type, prev_type=None):
-        if node is None:
-            return prev_type
+        if node is None: return prev_type
         b, a = apply_spacing(nodes, block_type)
-        if block_type == "H2" and prev_type == "IMAGE":
-            b = 1
+        if block_type == "H2" and prev_type == "IMAGE": b = 1
         ensure_spacing(nodes, b)
         nodes.append(node)
         needed = a - count_trailing_empty_paragraphs(nodes)
-        for _ in range(max(0, needed)):
-            nodes.append(empty_paragraph())
+        for _ in range(max(0, needed)): nodes.append(empty_paragraph())
         return block_type
 
     prev = None
@@ -266,18 +191,14 @@ def html_to_ricos(html_string, base_url=None, image_url_map=None, images_fifo=No
         if tag == "img" and elem.get("src"):
             img_obj = resolve_image_src(elem["src"], base_url, image_url_map, images_fifo)
             prev = add_node(wrap_image(img_obj, elem.get("alt", "")), "IMAGE", prev)
-
         elif tag in ["h2", "h3", "h4"]:
             level = int(tag[1])
             for im in elem.find_all("img"):
                 u = resolve_image_src(im["src"], base_url, image_url_map, images_fifo)
                 prev = add_node(wrap_image(u, im.get("alt", "")), "IMAGE", prev)
                 im.decompose()
-            
             txt = elem.get_text(strip=True)
-            if txt:
-                prev = add_node(wrap_heading(txt, level), f"H{level}", prev)
-
+            if txt: prev = add_node(wrap_heading(txt, level), f"H{level}", prev)
         elif tag == "p":
             imgs = elem.find_all("img")
             if imgs:
@@ -285,68 +206,209 @@ def html_to_ricos(html_string, base_url=None, image_url_map=None, images_fifo=No
                     u = resolve_image_src(im["src"], base_url, image_url_map, images_fifo)
                     prev = add_node(wrap_image(u, im.get("alt", "")), "IMAGE", prev)
                     im.decompose()
-
             parts = extract_parts(elem, bold_class, base_url, image_url_map, images_fifo)
-            if parts:
-                prev = add_node(wrap_paragraph_nodes(parts), "PARAGRAPH", prev)
-
+            if parts: prev = add_node(wrap_paragraph_nodes(parts), "PARAGRAPH", prev)
         elif tag in ["ul", "ol"]:
-            items = [extract_parts(li, bold_class, base_url, image_url_map, images_fifo)
-                     for li in elem.find_all("li", recursive=False)]
+            items = [extract_parts(li, bold_class, base_url, image_url_map, images_fifo) for li in elem.find_all("li", recursive=False)]
             items = [i for i in items if i]
-            if items:
-                prev = add_node(wrap_list(items, ordered=(tag == "ol")), "ORDERED_LIST" if tag == "ol" else "BULLETED_LIST", prev)
-
+            if items: prev = add_node(wrap_list(items, ordered=(tag == "ol")), "ORDERED_LIST" if tag == "ol" else "BULLETED_LIST", prev)
         elif tag == "table":
-            table = [
-                [extract_parts(td, bold_class, base_url, image_url_map, images_fifo) for td in tr.find_all(["td", "th"])]
-                for tr in elem.find_all("tr")
-            ]
-            if table:
-                table_node = wrap_table(table)
-                prev = add_node(table_node, "TABLE", prev)
-
-    while nodes and nodes[-1]["type"] == "PARAGRAPH" and not nodes[-1]["nodes"]:
-        nodes.pop()
-
+            table = [[extract_parts(td, bold_class, base_url, image_url_map, images_fifo) for td in tr.find_all(["td", "th"])] for tr in elem.find_all("tr")]
+            if table: table_node = wrap_table(table); prev = add_node(table_node, "TABLE", prev)
+    
+    while nodes and nodes[-1]["type"] == "PARAGRAPH" and not nodes[-1]["nodes"]: nodes.pop()
     return {"nodes": nodes}
 
-# =========================
-# Flask Endpoint
-# =========================
+
+# ==========================================
+#  VERSION B: GEGIDZE STYLES (New Endpoint)
+#  (Light Blue Links, Transparent Tables)
+# ==========================================
+
+def format_decorations_gegidze(is_bold=False, is_link=False, link_url=None, is_underline=False):
+    dec = []
+    if is_bold or is_link: dec.append({"type": "BOLD", "fontWeightValue": 700})
+    
+    # NEW COLOR: Light Blue #084EBD
+    if is_link:
+        dec.append({"type": "COLOR", "colorData": {"foreground": "#084EBD", "background": "transparent"}})
+    else:
+        dec.append({"type": "COLOR", "colorData": {"foreground": "rgb(0, 0, 0)", "background": "transparent"}})
+        
+    if is_link and link_url:
+        dec.append({"type": "LINK", "linkData": {"link": {"url": link_url, "target": "BLANK", "rel": {"noreferrer": True}}}})
+    if is_underline:
+        dec.append({"type": "UNDERLINE"})
+    return dec
+
+def build_text_node_gegidze(text, bold=False, link=None, underline=False, extra_decorations=None):
+    decorations = format_decorations_gegidze(bold, bool(link), link, underline)
+    if extra_decorations: decorations.extend(extra_decorations)
+    return {"type": "TEXT", "id": generate_id(), "textData": {"text": text, "decorations": decorations}}
+
+def wrap_heading_gegidze(text, level=2):
+    decorations = []
+    if level == 3: decorations.append({"type": "FONT_SIZE", "fontSizeData": {"unit": "PX", "value": 22}})
+    return {
+        "type": "HEADING", "id": generate_id(), "nodes": [build_text_node_gegidze(text, bold=True, extra_decorations=decorations)],
+        "style": {}, "headingData": {"level": level, "textStyle": {"textAlignment": "AUTO"}}
+    }
+
+def wrap_list_gegidze(items, ordered=False):
+    return {
+        "type": "ORDERED_LIST" if ordered else "BULLETED_LIST", "id": generate_id(),
+        "nodes": [{"type": "LIST_ITEM", "id": generate_id(), "nodes": [
+            {"type": "PARAGRAPH", "id": generate_id(), "nodes": item, "style": {"paddingTop": "0px", "paddingBottom": "0px"}, "paragraphData": {"textStyle": {"lineHeight": "2"}}}
+        ]} for item in items]
+    }
+
+def wrap_table_gegidze(table_data):
+    num_rows = len(table_data)
+    num_cols = max(len(row) for row in table_data) if table_data else 0
+    # NO BACKGROUND COLOR
+    return {
+        "type": "TABLE", "id": generate_id(),
+        "nodes": [{"type": "TABLE_ROW", "id": generate_id(), "nodes": [
+            {"type": "TABLE_CELL", "id": generate_id(), "nodes": [
+                wrap_paragraph_nodes([
+                    build_text_node_gegidze(
+                        node["textData"]["text"],
+                        extra_decorations=[{"type": "FONT_SIZE", "fontSizeData": {"unit": "PX", "value": 16}}] if r_idx > 0 and c_idx > 0 else None
+                    ) for node in cell if node["type"] == "TEXT"
+                ])
+            ], "tableCellData": {"cellStyle": {} if r_idx == 0 or c_idx == 0 else {}}}
+            for c_idx, cell in enumerate(row)
+        ]} for r_idx, row in enumerate(table_data)],
+        "tableData": {"dimensions": {"colsWidthRatio": [754] * num_cols, "rowsHeight": [47] * num_rows, "colsMinWidth": [120] * num_cols}}
+    }
+
+def extract_parts_gegidze(tag, bold_class, base_url, image_url_map, images_fifo):
+    parts = []
+    for item in tag.children:
+        if isinstance(item, NavigableString):
+            txt = str(item)
+            if txt.strip():
+                is_bold = item.parent.name == "span" and bold_class and bold_class in item.parent.get("class", [])
+                parts.append(build_text_node_gegidze(txt, bold=is_bold))
+        elif isinstance(item, Tag):
+            if item.name == "br": continue
+            if item.name == "img": continue
+            elif item.name == "a" and item.get("href"):
+                href = item["href"]
+                if "google.com/url?q=" in href: href = urllib.parse.unquote(href.split("q=")[1].split("&")[0])
+                else: href = urllib.parse.unquote(href)
+                is_bold = any(child.name == "span" and bold_class and bold_class in child.get("class", []) for child in item.descendants if isinstance(child, Tag))
+                parts.append(build_text_node_gegidze(item.get_text(), bold=is_bold, link=href, underline=True))
+            else:
+                parts.extend(extract_parts_gegidze(item, bold_class, base_url, image_url_map, images_fifo))
+    return parts
+
+def html_to_ricos_gegidze(html_string, base_url=None, image_url_map=None, images_fifo=None):
+    soup = BeautifulSoup(html_string, "html.parser")
+    body = soup.body or soup
+    nodes = []
+    bold_class = None
+    style_tag = soup.find("style")
+    if style_tag and style_tag.string:
+        for ln in style_tag.string.split("}"):
+            if "font-weight:700" in ln:
+                cls = ln.split("{")[0].strip()
+                if cls.startswith("."): bold_class = cls[1:]; break
+
+    def add_node(node, block_type, prev_type=None):
+        if node is None: return prev_type
+        b, a = apply_spacing(nodes, block_type)
+        if block_type == "H2" and prev_type == "IMAGE": b = 1
+        ensure_spacing(nodes, b)
+        nodes.append(node)
+        needed = a - count_trailing_empty_paragraphs(nodes)
+        for _ in range(max(0, needed)): nodes.append(empty_paragraph())
+        return block_type
+
+    prev = None
+    for elem in body.find_all(recursive=False):
+        tag = elem.name
+        # Using existing wrap_image logic as requested (Code A logic in Code C)
+        if tag == "img" and elem.get("src"):
+            img_obj = resolve_image_src(elem["src"], base_url, image_url_map, images_fifo)
+            prev = add_node(wrap_image(img_obj, elem.get("alt", "")), "IMAGE", prev)
+        elif tag in ["h2", "h3", "h4"]:
+            level = int(tag[1])
+            for im in elem.find_all("img"):
+                u = resolve_image_src(im["src"], base_url, image_url_map, images_fifo)
+                prev = add_node(wrap_image(u, im.get("alt", "")), "IMAGE", prev)
+                im.decompose()
+            txt = elem.get_text(strip=True)
+            if txt: prev = add_node(wrap_heading_gegidze(txt, level), f"H{level}", prev)
+        elif tag == "p":
+            imgs = elem.find_all("img")
+            if imgs:
+                for im in imgs:
+                    u = resolve_image_src(im["src"], base_url, image_url_map, images_fifo)
+                    prev = add_node(wrap_image(u, im.get("alt", "")), "IMAGE", prev)
+                    im.decompose()
+            parts = extract_parts_gegidze(elem, bold_class, base_url, image_url_map, images_fifo)
+            if parts: prev = add_node(wrap_paragraph_nodes(parts), "PARAGRAPH", prev)
+        elif tag in ["ul", "ol"]:
+            items = [extract_parts_gegidze(li, bold_class, base_url, image_url_map, images_fifo) for li in elem.find_all("li", recursive=False)]
+            items = [i for i in items if i]
+            if items: prev = add_node(wrap_list_gegidze(items, ordered=(tag == "ol")), "ORDERED_LIST" if tag == "ol" else "BULLETED_LIST", prev)
+        elif tag == "table":
+            table = [[extract_parts_gegidze(td, bold_class, base_url, image_url_map, images_fifo) for td in tr.find_all(["td", "th"])] for tr in elem.find_all("tr")]
+            if table: table_node = wrap_table_gegidze(table); prev = add_node(table_node, "TABLE", prev)
+    
+    while nodes and nodes[-1]["type"] == "PARAGRAPH" and not nodes[-1]["nodes"]: nodes.pop()
+    return {"nodes": nodes}
+
+
+# ==========================================
+#  ENDPOINTS
+# ==========================================
 
 @app.route("/convert-html", methods=["POST"])
 def convert_html():
     data = request.get_json()
-
     html_string = data.get("html")
     base_url = data.get("base_url")
 
-    if not html_string:
-        return jsonify({"error": "Missing 'html' in request body"}), 400
+    if not html_string: return jsonify({"error": "Missing 'html' in request body"}), 400
 
     image_url_map = None
-
     if "uploaded_array" in data:
         uploaded = data["uploaded_array"]
         image_url_map = {}
         for item in uploaded:
             name = item.get("name") or os.path.basename(item.get("url", "")) or item.get("id")
-            if not name:
-                continue
+            if not name: continue
             image_url_map[name] = item
-
-    if not image_url_map and "image_url_map" in data:
-        image_url_map = data["image_url_map"]
-
+    if not image_url_map and "image_url_map" in data: image_url_map = data["image_url_map"]
     images_fifo = data.get("images_fifo")
 
-    result = html_to_ricos(
-        html_string,
-        base_url=base_url,
-        image_url_map=image_url_map,
-        images_fifo=images_fifo
-    )
+    result = html_to_ricos(html_string, base_url=base_url, image_url_map=image_url_map, images_fifo=images_fifo)
+    return jsonify(result)
+
+
+@app.route("/convert-html-gegidze", methods=["POST"])
+def convert_html_gegidze():
+    data = request.get_json()
+    html_string = data.get("html")
+    base_url = data.get("base_url")
+
+    if not html_string: return jsonify({"error": "Missing 'html' in request body"}), 400
+
+    image_url_map = None
+    if "uploaded_array" in data:
+        uploaded = data["uploaded_array"]
+        image_url_map = {}
+        for item in uploaded:
+            name = item.get("name") or os.path.basename(item.get("url", "")) or item.get("id")
+            if not name: continue
+            image_url_map[name] = item
+    if not image_url_map and "image_url_map" in data: image_url_map = data["image_url_map"]
+    images_fifo = data.get("images_fifo")
+
+    # Uses the GEGIDZE version of the processor
+    result = html_to_ricos_gegidze(html_string, base_url=base_url, image_url_map=image_url_map, images_fifo=images_fifo)
     return jsonify(result)
 
 if __name__ == "__main__":
